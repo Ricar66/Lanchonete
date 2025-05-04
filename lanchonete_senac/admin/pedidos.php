@@ -11,63 +11,66 @@ include('../includes/header.php');
 // Processar novo pedido
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['finalizar_pedido'])) {
     try {
+        // Verificação crítica de itens
+        if (!isset($_POST['produtos']) || empty($_POST['produtos'])) {
+            throw new Exception("Adicione pelo menos um item ao pedido antes de finalizar!");
+        }
+
         $conexao->begin_transaction();
 
-        // ========== ALTERAÇÃO IMPORTANTE ========== //
         $cliente_id = !empty($_POST['cliente_id']) ? $_POST['cliente_id'] : null;
-        // ========================================== //
 
         // Inserir pedido principal
         $stmt = $conexao->prepare("INSERT INTO tb_pedidos (cliente_id, observacoes) VALUES (?, ?)");
-        $stmt->bind_param("ss", $cliente_id, $_POST['observacoes']); // Alterado para 's' para permitir NULL
+        $stmt->bind_param("ss", $cliente_id, $_POST['observacoes']);
         $stmt->execute();
         $pedido_id = $conexao->insert_id;
         $stmt->close();
 
         // Processar itens do pedido
-        if (isset($_POST['produtos']) && is_array($_POST['produtos'])) {
-            foreach ($_POST['produtos'] as $produto) {
-                // Buscar preço do produto
-                $stmt_produto = $conexao->prepare("SELECT preco FROM tb_produtos WHERE id = ?");
-                $stmt_produto->bind_param("i", $produto['id']);
-                $stmt_produto->execute();
-                $preco_unitario = $stmt_produto->get_result()->fetch_assoc()['preco'];
-                $stmt_produto->close();
+        $total_pedido = 0; // Variável para calcular o total
+        foreach ($_POST['produtos'] as $produto) {
+            // Buscar preço do produto
+            $stmt_produto = $conexao->prepare("SELECT preco FROM tb_produtos WHERE id = ?");
+            $stmt_produto->bind_param("i", $produto['id']);
+            $stmt_produto->execute();
+            $preco_unitario = $stmt_produto->get_result()->fetch_assoc()['preco'];
+            $stmt_produto->close();
 
-                // Inserir item principal
-                $stmt_item = $conexao->prepare("INSERT INTO tb_itens_pedido 
-                    (pedido_id, produto_id, quantidade, preco_unitario) 
-                    VALUES (?, ?, ?, ?)");
-                $stmt_item->bind_param("iiid", $pedido_id, $produto['id'], $produto['quantidade'], $preco_unitario);
-                $stmt_item->execute();
-                $item_pedido_id = $conexao->insert_id;
-                $stmt_item->close();
+            // Inserir item principal
+            $stmt_item = $conexao->prepare("INSERT INTO tb_itens_pedido 
+                (pedido_id, produto_id, quantidade, preco_unitario) 
+                VALUES (?, ?, ?, ?)");
+            $stmt_item->bind_param("iiid", $pedido_id, $produto['id'], $produto['quantidade'], $preco_unitario);
+            $stmt_item->execute();
+            $item_pedido_id = $conexao->insert_id;
+            $stmt_item->close();
 
-                // Processar adicionais
-                if (!empty($produto['adicionais'])) {
-                    $adicionais = json_decode($produto['adicionais'], true);
-                    foreach ($adicionais as $adicional) {
-                        $stmt_adicional = $conexao->prepare("INSERT INTO tb_itens_pedido_adicionais 
-                            (item_pedido_id, adicional_id, quantidade) 
-                            VALUES (?, ?, ?)");
-                        $stmt_adicional->bind_param("iii", $item_pedido_id, $adicional['id'], $adicional['quantidade']);
-                        $stmt_adicional->execute();
-                        $stmt_adicional->close();
-                    }
+            // Calcular subtotal
+            $subtotal = $preco_unitario * $produto['quantidade'];
+            $total_pedido += $subtotal;
+
+            // Processar adicionais
+            if (!empty($produto['adicionais'])) {
+                $adicionais = json_decode($produto['adicionais'], true);
+                foreach ($adicionais as $adicional) {
+                    $stmt_adicional = $conexao->prepare("INSERT INTO tb_itens_pedido_adicionais 
+                        (item_pedido_id, adicional_id, quantidade) 
+                        VALUES (?, ?, ?)");
+                    $stmt_adicional->bind_param("iii", $item_pedido_id, $adicional['id'], $adicional['quantidade']);
+                    $stmt_adicional->execute();
+                    $stmt_adicional->close();
+
+                    // Adicionar ao total
+                    $total_pedido += ($adicional['preco'] * $adicional['quantidade']);
                 }
             }
         }
 
-        // Calcular o total do pedido
-        $total_pedido = 0;
-        foreach ($itensPedido as $item) {
-            $total_pedido += $item['total'];
-        }
-
         // Inserir na tabela de vendas
         $stmt_venda = $conexao->prepare("INSERT INTO tb_vendas 
-    (pedido_id, data_venda, cliente_id, valor_total) 
-    VALUES (?, NOW(), ?, ?)");
+            (pedido_id, data_venda, cliente_id, valor_total) 
+            VALUES (?, NOW(), ?, ?)");
         $stmt_venda->bind_param("iid", $pedido_id, $cliente_id, $total_pedido);
         $stmt_venda->execute();
 
@@ -76,24 +79,32 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['finalizar_pedido'])) {
         exit();
     } catch (Exception $e) {
         $conexao->rollback();
-        error_log("Erro ao processar pedido: " . $e->getMessage());
         echo "<div class='alert alert-danger'>Erro: " . $e->getMessage() . "</div>";
     }
 }
-
 
 // Buscar categorias para filtro
 $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
 ?>
 
+<!-- Estilos Adicionais -->
+<style>
+    #btnFinalizar:disabled {
+        opacity: 0.7;
+        cursor: not-allowed;
+        background-color: #6c757d !important;
+        border-color: #6c757d !important;
+    }
+</style>
+
 <div class="container mt-5">
     <h2>Fazer Novo Pedido</h2>
     <form method="post" id="formPedido">
-        <!-- Seção de Cliente Modificada -->
+        <!-- Seção do Cliente -->
         <div class="mb-3">
             <label for="cliente_id" class="form-label">Cliente:</label>
             <select class="form-select" id="cliente_id" name="cliente_id">
-                <option value="">Cliente não cadastrado</option> <!-- Opção padrão alterada -->
+                <option value="">Cliente não cadastrado</option>
                 <?php
                 $clientes = $conexao->query("SELECT * FROM tb_clientes");
                 while ($cliente = $clientes->fetch_assoc()) {
@@ -188,6 +199,10 @@ $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
             </div>
             <div class="card-body">
                 <ul class="list-group" id="listaItens"></ul>
+                <div id="avisoVazio" class="text-center text-muted mt-3" style="display: none;">
+                    <i class="fas fa-shopping-basket fa-2x"></i>
+                    <p class="mt-2">Nenhum item adicionado ao pedido</p>
+                </div>
             </div>
         </div>
 
@@ -198,7 +213,10 @@ $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
         </div>
 
         <!-- Botão Finalizar -->
-        <button type="submit" name="finalizar_pedido" class="btn btn-success btn-lg">
+        <button type="submit" name="finalizar_pedido" 
+                id="btnFinalizar" 
+                class="btn btn-success btn-lg w-100"
+                disabled>
             <i class="fas fa-check-circle"></i> Finalizar Pedido
         </button>
     </form>
@@ -211,7 +229,7 @@ $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
             const categoria = this.dataset.categoria;
 
             // Atualizar botões ativos
-            document.querySelectorAll('[data-categoria]').forEach(b =>
+            document.querySelectorAll('[data-categoria]').forEach(b => 
                 b.classList.remove('active'));
             this.classList.add('active');
 
@@ -228,6 +246,7 @@ $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
             document.getElementById('produto_id').selectedIndex = 0;
         });
     });
+
     let itensPedido = [];
 
     function adicionarItem() {
@@ -237,6 +256,7 @@ $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
         const precoBase = parseFloat(produtoSelect.options[produtoSelect.selectedIndex].dataset.preco);
         const quantidade = parseInt(document.getElementById('quantidade').value);
 
+        // Validação básica
         if (!produtoId || isNaN(quantidade) || quantidade < 1) {
             alert('Selecione um produto e quantidade válida!');
             return;
@@ -254,7 +274,7 @@ $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
         });
 
         // Calcular preço total
-        const precoTotal = (precoBase * quantidade) +
+        const precoTotal = (precoBase * quantidade) + 
             adicionais.reduce((sum, a) => sum + (a.preco * a.quantidade), 0);
 
         // Adicionar ao array
@@ -275,28 +295,41 @@ $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
 
     function atualizarListaItens() {
         const lista = document.getElementById('listaItens');
+        const aviso = document.getElementById('avisoVazio');
         lista.innerHTML = '';
 
-        itensPedido.forEach((item, index) => {
-            const li = document.createElement('li');
-            li.className = 'list-group-item d-flex justify-content-between align-items-center';
-            li.innerHTML = `
-            <div>
-                <strong>${item.produto.nome}</strong> (${item.produto.quantidade}x)
-                ${item.adicionais.length > 0 ? 
-                    `<div class="text-muted small mt-1">
-                        + ${item.adicionais.map(a => `${a.nome} (${a.quantidade}x)`).join(', ')}
-                    </div>` : ''}
-            </div>
-            <div>
-                <span class="badge bg-primary rounded-pill">R$ ${item.total.toFixed(2)}</span>
-                <button class="btn btn-danger btn-sm ms-2" onclick="removerItem(${index})">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-        `;
-            lista.appendChild(li);
-        });
+        if (itensPedido.length === 0) {
+            aviso.style.display = 'block';
+        } else {
+            aviso.style.display = 'none';
+            itensPedido.forEach((item, index) => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item d-flex justify-content-between align-items-center';
+                li.innerHTML = `
+                    <div>
+                        <strong>${item.produto.nome}</strong> (${item.produto.quantidade}x)
+                        ${item.adicionais.length > 0 ? 
+                            `<div class="text-muted small mt-1">
+                                + ${item.adicionais.map(a => `${a.nome} (${a.quantidade}x)`).join(', ')}
+                            </div>` : ''}
+                    </div>
+                    <div>
+                        <span class="badge bg-primary rounded-pill">R$ ${item.total.toFixed(2)}</span>
+                        <button class="btn btn-danger btn-sm ms-2" onclick="removerItem(${index})">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                `;
+                lista.appendChild(li);
+            });
+        }
+
+        // Atualizar estado do botão
+        const btnFinalizar = document.getElementById('btnFinalizar');
+        btnFinalizar.disabled = itensPedido.length === 0;
+        btnFinalizar.innerHTML = itensPedido.length === 0 
+            ? '<i class="fas fa-ban"></i> Adicione itens para finalizar' 
+            : '<i class="fas fa-check-circle"></i> Finalizar Pedido';
     }
 
     function removerItem(index) {
@@ -314,9 +347,18 @@ $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
 
     // Preparar dados para envio
     document.getElementById('formPedido').addEventListener('submit', function(e) {
+        // Validar itens
+        if (itensPedido.length === 0) {
+            e.preventDefault();
+            alert('Adicione pelo menos um item ao pedido!');
+            return;
+        }
+
+        // Limpar inputs antigos
         const inputsHidden = document.querySelectorAll('input[name^="produtos"]');
         inputsHidden.forEach(input => input.remove());
 
+        // Criar novos inputs
         itensPedido.forEach((item, index) => {
             // Produto principal
             criarInputHidden(`produtos[${index}][id]`, item.produto.id);
@@ -336,6 +378,9 @@ $categorias = $conexao->query("SELECT * FROM tb_categorias ORDER BY nome");
         input.value = value;
         document.getElementById('formPedido').appendChild(input);
     }
+
+    // Inicializar lista
+    atualizarListaItens();
 </script>
 
 <?php include('../includes/footer.php'); ?>
